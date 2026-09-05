@@ -95,7 +95,7 @@ public:
 
     // condicoes (segundo byte do opcode 0F 8x)
     enum { E = 0x84, NE = 0x85, B = 0x82, AE = 0x83, LE = 0x8E,
-           G = 0x8F, L = 0x8C, GE = 0x8D, NS = 0x89, S = 0x88 };
+           G = 0x8F, L = 0x8C, GE = 0x8D, NS = 0x89, S = 0x88, A = 0x87 };
 
 private:
     uint64_t                                    base;
@@ -108,22 +108,30 @@ private:
 // Estado / features
 // -----------------------------------------------------------------------------
 enum FeatureId {
-    F_GODMODE = 0,      // dano recebido zerado (hook)
-    F_DEFMUL,           // divisor do dano recebido (hook)
-    F_DMGMUL,           // multiplicador do dano causado (hook)
-    F_ONEHIT,           // morte instantanea (hook)
-    F_EXPMUL,           // multiplicador de EXP (hook)
+    F_GODMODE = 0,      // dano recebido zerado                 (hook AddHp)
+    F_DEFMUL,           // divisor do dano recebido             (hook AddHp)
+    F_DMGMUL,           // multiplicador do dano causado        (hook AddHp)
+    F_ONEHIT,           // morte instantanea                    (hook AddHp)
 
-    F_INFHP,            // HP travado no maximo (polling)
-    F_INFEP,            // EP travado no maximo (polling)
-    F_INFCP,            // CP travado no maximo (polling)
+    F_INFHP,            // HP travado no maximo                 (polling)
+    F_INFEP,            // EP travado no maximo                 (polling)
+    F_INFCP,            // CP travado no maximo                 (polling)
 
-    F_MIRA,             // mira travada (polling)
-    F_SEPITH,           // sepith travado (polling)
-    F_ITEMS,            // itens que voce possui travados em 99 (polling)
+    F_EXPMUL,           // multiplicador de EXP                 (hook CalcExp)
+    F_SEPMUL,           // multiplicador de sepith recebido     (hook AddItem)
+
+    F_MIRAMUL,          // multiplicador de mira recebida       (hook AddMira)
+    F_ITEMMUL,          // multiplicador de itens recebidos     (hook AddItem)
+
+    F_MIRA,             // mira travada                         (polling)
+    F_SEPITH,           // sepith travado                       (polling)
+    F_ITEMS,            // itens em estoque travados            (polling)
 
     F_COUNT
 };
+
+// indices no vetor de hooks
+enum HookId { HK_ADDHP = 0, HK_EXP, HK_MIRA, HK_ITEM, HK_COUNT };
 
 struct FeatureState {
     bool  on    = false;
@@ -140,6 +148,7 @@ struct CharaRow {
     int        slot;
     uint64_t   addr;
     StatusView st;
+    wchar_t    name[32];
 };
 
 // -----------------------------------------------------------------------------
@@ -180,6 +189,10 @@ private:
     bool     allocCave();
     uint64_t caveAlloc(uint32_t n);
 
+    // tabela de nomes (datatable "NameTableData")
+    void         refreshNameTable();
+    const wchar_t* nameFor(int32_t charaId);
+
     Process  proc;
     HANDLE   thread   = nullptr;
     volatile bool running = false;
@@ -188,21 +201,31 @@ private:
 
     bool     resolved = false;
     int      missingSigs = 0;
+    int      totalSigs   = 0;
 
-    // enderecos resolvidos (absolutos)
+    // ---- enderecos resolvidos (absolutos) -----------------------------------
     uint64_t gBattleMgr   = 0;   // ponteiro para battle::Manager
     uint64_t gSaveMgr     = 0;   // ponteiro para savedata::Manager
+    uint64_t gDataMgr     = 0;   // ponteiro para datatable::Manager
     uint64_t fnAddHp      = 0;   // battle::Object::AddHp
+    uint64_t fnAddMira    = 0;   // savedata::Manager::AddMira
+    uint64_t fnAddItem    = 0;   // savedata::Manager::AddItem
     uint64_t sitExp       = 0;   // epilogo do calculo de EXP
+
     uint32_t offStatusArr = 0;   // savedata -> array de Status
     uint32_t offStatusStr = 0;   // stride do Status (0x2A0)
     uint32_t offItems     = 0;   // savedata -> tabela de itens
     uint32_t offMira      = 0;   // savedata -> mira
     uint32_t offSepith    = 0;   // savedata -> sepith[7]
 
-    // code cave
+    // layout generico das datatables (vem da assinatura de TableFind)
+    uint32_t tblIdxOff = 0x28, tblDirOff = 0x20, tblBaseOff = 0x10;
+    uint32_t dirCountOff = 0x4C, dirStrideOff = 0x48, dirStartOff = 0x44;
+
+    // ---- code cave -----------------------------------------------------------
     uint64_t cave = 0, caveNext = 0;
     uint64_t vGod = 0, vDefMul = 0, vDmgMul = 0, vOneHit = 0, vExpMul = 0;
+    uint64_t vMiraMul = 0, vItemMul = 0, vSepMul = 0;
     uint64_t vPartyLo = 0, vPartyHi = 0;
 
     struct Hook {
@@ -212,12 +235,18 @@ private:
         std::vector<uint8_t> orig;
         bool                 on    = false;
     };
-    Hook hooks[2];              // 0 = AddHp, 1 = EXP
+    Hook hooks[HK_COUNT];
 
     FeatureState feat[F_COUNT];
     std::vector<CharaRow> snapshot;
     uint64_t partyLo = 0, partyHi = 0;
     int      pollTick = 0;
+
+    // cache da tabela de nomes
+    uint64_t nameRecs = 0;
+    uint32_t nameStride = 0, nameCount = 0;
+    std::vector<uint8_t>            nameBlock;
+    std::map<int32_t, std::wstring> nameCache;
 };
 
 extern Engine g_engine;
