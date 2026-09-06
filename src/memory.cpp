@@ -92,18 +92,44 @@ std::vector<HANDLE> Process::freezeThreads() const
     std::vector<HANDLE> out;
     if (!pid) return out;
 
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return out;
+    // Duas passadas: uma thread criada entre o snapshot e a escrita do patch
+    // escaparia da suspensao. Repetimos ate um snapshot nao trazer nenhuma
+    // thread nova (no maximo 4 rodadas, para nao travar aqui).
+    for (int round = 0; round < 4; ++round) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE) break;
 
-    THREADENTRY32 te; te.dwSize = sizeof(te);
-    if (Thread32First(snap, &te)) {
-        do {
-            if (te.th32OwnerProcessID != pid) continue;
-            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-            if (t) { SuspendThread(t); out.push_back(t); }
-        } while (Thread32Next(snap, &te));
+        size_t before = out.size();
+        THREADENTRY32 te; te.dwSize = sizeof(te);
+        if (Thread32First(snap, &te)) {
+            do {
+                if (te.th32OwnerProcessID != pid) continue;
+
+                bool known = false;
+                for (size_t i = 0; i < out.size() && !known; ++i)
+                    if (GetThreadId(out[i]) == te.th32ThreadID) known = true;
+                if (known) continue;
+
+                HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
+                                      FALSE, te.th32ThreadID);
+                if (!t) continue;
+                if (SuspendThread(t) == (DWORD)-1) { CloseHandle(t); continue; }
+
+                // SuspendThread so agenda a suspensao. Ler o contexto forca o
+                // kernel a esperar a thread parar de verdade antes de voltar -
+                // sem isso ainda daria para gravar o patch com a thread
+                // executando exatamente aqueles bytes.
+                CONTEXT ctx;
+                memset(&ctx, 0, sizeof(ctx));
+                ctx.ContextFlags = CONTEXT_CONTROL;
+                GetThreadContext(t, &ctx);
+
+                out.push_back(t);
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+        if (out.size() == before) break;      // nenhuma thread nova
     }
-    CloseHandle(snap);
     return out;
 }
 

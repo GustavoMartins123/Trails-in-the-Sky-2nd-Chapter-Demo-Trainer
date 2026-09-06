@@ -119,6 +119,7 @@ enum FeatureId {
 
     F_EXPMUL,           // multiplicador de EXP                 (hook CalcExp)
     F_SEPMUL,           // multiplicador de sepith recebido     (hook AddItem)
+    F_QZMUL,            // multiplicador do valor elemental dos quartzos (hook)
 
     F_MIRAMUL,          // multiplicador de mira recebida       (hook AddMira)
     F_ITEMMUL,          // multiplicador de itens recebidos     (hook AddItem)
@@ -131,7 +132,7 @@ enum FeatureId {
 };
 
 // indices no vetor de hooks
-enum HookId { HK_ADDHP = 0, HK_EXP, HK_MIRA, HK_ITEM, HK_COUNT };
+enum HookId { HK_ADDHP = 0, HK_EXP, HK_MIRA, HK_ITEM, HK_QUARTZ, HK_COUNT };
 
 struct FeatureState {
     bool  on    = false;
@@ -171,6 +172,9 @@ public:
     volatile LONG miraValue   = 9999999;
     volatile LONG sepithValue = 9999;
     volatile LONG itemValue   = 99;
+    // a GUI liga isso enquanto a aba Party esta visivel; sem isso o
+    // trainer nao le o bloco de Status do jogo a toa
+    volatile LONG wantSnapshot = 0;
 
     bool connected();
 
@@ -180,6 +184,12 @@ private:
 
     bool  installHook(int which);
     void  removeHook(int which);
+    // Localiza um site de hook. Se ele estiver com um patch orfao (deixado por
+    // uma execucao anterior do trainer que morreu sem restaurar), restaura os
+    // bytes originais antes de devolver o endereco.
+    uint64_t findHookSite(Scanner& sc, const char* pattern, uint32_t steal,
+                          std::vector<uint64_t>* caps);
+    bool  repairSite(uint64_t site, uint32_t steal, const Pattern& pat);
     void  syncHooks();
     void  writeVars();
 
@@ -211,6 +221,7 @@ private:
     uint64_t fnAddMira    = 0;   // savedata::Manager::AddMira
     uint64_t fnAddItem    = 0;   // savedata::Manager::AddItem
     uint64_t sitExp       = 0;   // epilogo do calculo de EXP
+    uint64_t sitQuartz    = 0;   // soma dos valores elementais dos quartzos
 
     uint32_t offStatusArr = 0;   // savedata -> array de Status
     uint32_t offStatusStr = 0;   // stride do Status (0x2A0)
@@ -224,8 +235,10 @@ private:
 
     // ---- code cave -----------------------------------------------------------
     uint64_t cave = 0, caveNext = 0;
+    bool     varsValid = false;   // cache de writeVars (invalido a cada cave nova)
+    int      staleFixed = 0;      // quantos patches orfaos foram removidos
     uint64_t vGod = 0, vDefMul = 0, vDmgMul = 0, vOneHit = 0, vExpMul = 0;
-    uint64_t vMiraMul = 0, vItemMul = 0, vSepMul = 0;
+    uint64_t vMiraMul = 0, vItemMul = 0, vSepMul = 0, vQzMul = 0;
     uint64_t vPartyLo = 0, vPartyHi = 0;
 
     struct Hook {

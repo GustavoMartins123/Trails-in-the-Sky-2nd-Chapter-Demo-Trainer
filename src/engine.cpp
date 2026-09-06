@@ -68,7 +68,7 @@ const char* SEPITH =
 // savedata::Manager::AddItem(this, id, count)
 const char* ADD_ITEM =
     "48 89 6C 24 20 56 57 41 56 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
-    "48 89 44 24 50 48 8B 05 ?? ?? ?? ??";
+    "48 89 44 24 50 48 8B 05 ?? ?? ?? ?? 48 8B F1";
 // datatable::TableFind - confirma o layout generico das tabelas
 const char* TABLE_FIND =
     "48 89 5C 24 08 44 8B 51 28 33 C0 48 8B 59 20 44 8B DA 4F 8D 04 92 4D 03 C0 "
@@ -79,14 +79,22 @@ const char* TABLE_FIND =
 const char* ADDHP =
     "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 30 48 8B B9 E0 05 00 00";
 // epilogo do calculo de EXP da tela de resultado (retorna a EXP em eax)
+// Os bytes depois do trecho roubado tambem entram na assinatura: e o que
+// permite reencontrar o site quando ele ja esta com um patch orfao.
 const char* EXPCALC =
-    "8B C5 48 8B AC 24 88 00 00 00 48 81 C4 90 00 00 00";
+    "8B C5 48 8B AC 24 88 00 00 00 48 81 C4 90 00 00 00 41 5C C3 CC CC CC CC CC";
+// bloco que soma os 7 valores elementais de um quartzo no orbment:
+//   rax = QuartzParam*, rbp = int[7] de saida
+const char* QUARTZ_ELEM =
+    "0F B6 48 20 01 4D 00 0F B6 48 21 01 4D 04 0F B6 48 22 01 4D 08 "
+    "0F B6 48 23 01 4D 0C 0F B6 48 24 01 4D 10 0F B6 48 25 01 4D 14 "
+    "0F B6 48 26 01 4D 18 E9 ?? ?? ?? ?? CC CC CC 48 89 5C 24 18 55";
 }
 
 static const int   kStatusSlots = 100;
 static const int   kItemCount   = 5000;
 static const DWORD kPollMs      = 25;
-static const int   kSigTotal    = 10;
+static const int   kSigTotal    = 11;
 
 // ids de sepith dentro de AddItem
 static const int   kSepithIdLo  = 0x136;
@@ -124,6 +132,10 @@ const FeatureInfo kFeatures[] = {
    true, 1.0f, 100.0f, 5.0f, L"x" },
  { F_SEPMUL, 1, L"Multiplicador de Sepith",
    L"Multiplica todo sepith recebido (batalha, bau, evento). Teto: 99.999 por tipo.",
+   true, 1.0f, 100.0f, 5.0f, L"x" },
+ { F_QZMUL, 1, L"Multiplicador de Quartzo (valor elemental)",
+   L"Multiplica o valor elemental que cada quartzo equipado soma no orbment - "
+   L"e o que libera artes de nivel mais alto.",
    true, 1.0f, 100.0f, 5.0f, L"x" },
 
  // ---- aba 2: itens e dinheiro --------------------------------------------
@@ -217,6 +229,7 @@ bool Engine::resolve()
     if (!sc.loadImage()) return false;
 
     missingSigs = 0;
+    staleFixed  = 0;
     Pattern p;
     std::vector<uint64_t> caps;
     std::vector<uint64_t> hits;
@@ -256,13 +269,9 @@ bool Engine::resolve()
     } else ++missingSigs;
 
     // savedata::Manager::AddMira ------------------------------------------------
-    if (p.parse(sig::MIRA_ADD)) {
-        hits = sc.find(p, &caps);
-        if (hits.size() == 1 && caps.size() == 1) {
-            fnAddMira = hits[0];
-            offMira   = (uint32_t)caps[0];
-        } else ++missingSigs;
-    } else ++missingSigs;
+    fnAddMira = findHookSite(sc, sig::MIRA_ADD, 11, &caps);
+    if (fnAddMira && caps.size() == 1) offMira = (uint32_t)caps[0];
+    else { fnAddMira = 0; ++missingSigs; }
 
     // sepith ---------------------------------------------------------------------
     if (p.parse(sig::SEPITH)) {
@@ -272,11 +281,8 @@ bool Engine::resolve()
     } else ++missingSigs;
 
     // savedata::Manager::AddItem --------------------------------------------------
-    if (p.parse(sig::ADD_ITEM)) {
-        hits = sc.find(p, nullptr);
-        if (hits.size() == 1) fnAddItem = hits[0];
-        else ++missingSigs;
-    } else ++missingSigs;
+    fnAddItem = findHookSite(sc, sig::ADD_ITEM, 5, 0);
+    if (!fnAddItem) ++missingSigs;
 
     // Confirma o layout generico das datatables. A funcao TableFind e um
     // template instanciado varias vezes com offsets diferentes; casamos a
@@ -291,18 +297,16 @@ bool Engine::resolve()
     } else ++missingSigs;
 
     // battle::Object::AddHp -------------------------------------------------------
-    if (p.parse(sig::ADDHP)) {
-        hits = sc.find(p, nullptr);
-        if (hits.size() == 1) fnAddHp = hits[0];
-        else ++missingSigs;
-    } else ++missingSigs;
+    fnAddHp = findHookSite(sc, sig::ADDHP, 5, 0);
+    if (!fnAddHp) ++missingSigs;
 
     // epilogo do calculo de EXP ----------------------------------------------------
-    if (p.parse(sig::EXPCALC)) {
-        hits = sc.find(p, nullptr);
-        if (hits.size() == 1) sitExp = hits[0];
-        else ++missingSigs;
-    } else ++missingSigs;
+    sitExp = findHookSite(sc, sig::EXPCALC, 10, 0);
+    if (!sitExp) ++missingSigs;
+
+    // soma dos valores elementais dos quartzos ---------------------------------------
+    sitQuartz = findHookSite(sc, sig::QUARTZ_ELEM, 49, 0);
+    if (!sitQuartz) ++missingSigs;
 
     if (!gSaveMgr || !offStatusArr || !offStatusStr) return false;
 
@@ -310,6 +314,7 @@ bool Engine::resolve()
     hooks[HK_EXP  ].site = sitExp;    hooks[HK_EXP  ].steal = 10;
     hooks[HK_MIRA ].site = fnAddMira; hooks[HK_MIRA ].steal = 11;
     hooks[HK_ITEM ].site = fnAddItem; hooks[HK_ITEM ].steal = 5;
+    hooks[HK_QUARTZ].site = sitQuartz; hooks[HK_QUARTZ].steal = 49;
 
     if (!allocCave()) return false;
     return true;
@@ -318,15 +323,20 @@ bool Engine::resolve()
 void Engine::releaseAll()
 {
     for (int i = 0; i < HK_COUNT; ++i) removeHook(i);
-    if (proc.handle && cave)
+    if (proc.handle && cave) {
+        // Tirar o patch nao garante que ninguem esteja executando DENTRO do
+        // trampolim neste instante. Liberar a pagina agora derrubaria o jogo,
+        // entao damos uma folga para as threads sairem da cave.
+        Sleep(250);
         VirtualFreeEx(proc.handle, (LPVOID)cave, 0, MEM_RELEASE);
+    }
     for (int i = 0; i < HK_COUNT; ++i) {
         hooks[i] = Hook();
     }
     cave = caveNext = 0;
     resolved = false;
     gBattleMgr = gSaveMgr = gDataMgr = 0;
-    fnAddHp = fnAddMira = fnAddItem = sitExp = 0;
+    fnAddHp = fnAddMira = fnAddItem = sitExp = sitQuartz = 0;
     offStatusArr = offStatusStr = offItems = offMira = offSepith = 0;
     partyLo = partyHi = 0;
     nameRecs = 0; nameStride = nameCount = 0;
@@ -369,7 +379,9 @@ bool Engine::allocCave()
     vMiraMul = cave + 0x24;
     vItemMul = cave + 0x28;
     vSepMul  = cave + 0x2C;
+    vQzMul   = cave + 0x30;
     caveNext = cave + 0x1000;
+    varsValid = false;          // cave nova: o cache de writeVars nao vale mais
     return true;
 }
 
@@ -382,7 +394,93 @@ uint64_t Engine::caveAlloc(uint32_t n)
 
 // -----------------------------------------------------------------------------
 // Hooks
+//
+//  Cada trampolim carrega um cabecalho auto-descritivo logo antes do codigo:
+//  se o trainer morrer sem restaurar (fechado a forca, crash), a proxima
+//  execucao encontra o site com um "jmp" orfao, segue o jmp, le esse cabecalho
+//  e recupera os bytes originais de verdade. Sem isso a instancia seguinte
+//  gravaria o proprio jmp como se fosse o codigo original, encadeando hooks e
+//  deixando o jogo com um salto pendurado assim que uma cave fosse liberada.
 // -----------------------------------------------------------------------------
+static const uint64_t kCaveMagic = 0x3152545348524F53ULL;   // "SORHSTR1"
+
+struct CaveHdr {
+    uint64_t magic;
+    uint32_t origLen;
+    uint32_t reserved;
+    uint8_t  orig[64];
+};
+
+bool Engine::repairSite(uint64_t site, uint32_t steal, const Pattern& pat)
+{
+    if (proc.readT<uint8_t>(site, 0) != 0xE9) return false;   // nao tem patch
+
+    // 1) caminho preferido: cabecalho do trampolim orfao
+    int32_t  rel   = proc.readT<int32_t>(site + 1, 0);
+    uint64_t tramp = site + 5 + (int64_t)rel;
+    CaveHdr  hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    if (proc.read(tramp - sizeof(CaveHdr), &hdr, sizeof(hdr)) &&
+        hdr.magic == kCaveMagic && hdr.origLen == steal &&
+        hdr.origLen <= sizeof(hdr.orig)) {
+        std::vector<HANDLE> fr = proc.freezeThreads();
+        bool ok = proc.write(site, hdr.orig, hdr.origLen);
+        proc.thawThreads(fr);
+        if (ok) { ++staleFixed; return true; }
+    }
+
+    // 2) reserva: se todos os bytes roubados sao literais na assinatura, eles
+    //    proprios sao o codigo original. Cobre patches deixados por versoes
+    //    antigas do trainer, que ainda nao gravavam cabecalho.
+    if (pat.tokens.size() < steal) return false;
+    std::vector<uint8_t> lit(steal);
+    for (uint32_t i = 0; i < steal; ++i) {
+        if (pat.tokens[i] < 0) return false;
+        lit[i] = (uint8_t)pat.tokens[i];
+    }
+    std::vector<HANDLE> fr = proc.freezeThreads();
+    bool ok = proc.write(site, &lit[0], lit.size());
+    proc.thawThreads(fr);
+    if (ok) ++staleFixed;
+    return ok;
+}
+
+uint64_t Engine::findHookSite(Scanner& sc, const char* text, uint32_t steal,
+                              std::vector<uint64_t>* caps)
+{
+    Pattern p;
+    if (!p.parse(text)) return 0;
+
+    std::vector<uint64_t> hits = sc.find(p, caps);
+    if (hits.size() == 1) return hits[0];
+    if (!hits.empty())    return 0;              // ambiguo: melhor nao tocar
+
+    // Nao casou. Pode ser um patch orfao: refaz a busca ignorando exatamente os
+    // bytes que o patch teria sobrescrito.
+    Pattern rec = p;
+    for (uint32_t i = 0; i < steal && i < rec.tokens.size(); ++i) rec.tokens[i] = -1;
+    for (size_t i = rec.caps.size(); i-- > 0; )
+        if (rec.caps[i].first < (int)steal) rec.caps.erase(rec.caps.begin() + i);
+
+    hits = sc.find(rec, 0);
+    if (hits.size() != 1) return 0;
+    if (!repairSite(hits[0], steal, p)) return 0;
+
+    // Site limpo de novo: as capturas voltam a ser lidas da memoria do jogo.
+    if (caps) {
+        caps->clear();
+        std::vector<uint8_t> raw(p.tokens.size());
+        if (proc.read(hits[0], &raw[0], raw.size())) {
+            for (size_t c = 0; c < p.caps.size(); ++c) {
+                uint64_t v = 0;
+                memcpy(&v, &raw[p.caps[c].first], p.caps[c].second);
+                caps->push_back(v);
+            }
+        }
+    }
+    return hits[0];
+}
+
 bool Engine::installHook(int which)
 {
     Hook& h = hooks[which];
@@ -391,10 +489,21 @@ bool Engine::installHook(int which)
     if (h.orig.empty()) {
         h.orig.assign(h.steal, 0);
         if (!proc.read(h.site, &h.orig[0], h.steal)) { h.orig.clear(); return false; }
+        // Nunca guardar um jmp como "codigo original": isso encadearia hooks.
+        if (h.orig[0] == 0xE9) { h.orig.clear(); return false; }
     }
     if (!h.tramp) {
-        uint64_t t = caveAlloc(0x200);
+        uint64_t slot = caveAlloc(0x400);
+        uint64_t t    = slot + sizeof(CaveHdr);
         if (llabs((int64_t)t - (int64_t)(h.site + 5)) > 0x7FF00000LL) return false;
+
+        CaveHdr hdr;
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.magic   = kCaveMagic;
+        hdr.origLen = h.steal;
+        memcpy(hdr.orig, &h.orig[0],
+               h.steal <= sizeof(hdr.orig) ? h.steal : sizeof(hdr.orig));
+        if (!proc.write(slot, &hdr, sizeof(hdr))) return false;
 
         Asm a(t);
         if (which == HK_ADDHP) {
@@ -474,6 +583,31 @@ bool Engine::installHook(int which)
             a.raw(&h.orig[0], h.orig.size());
             a.jmpAbs(h.site + h.steal);
 
+        } else if (which == HK_QUARTZ) {
+            // Bloco original: 7x  movzx ecx,byte[rax+0x20+i] ; add [rbp+i*4],ecx
+            //   rax = QuartzParam do quartzo equipado, rbp = acumulador int[7].
+            // Refazemos os 7 pares escalando cada contribuicao. xmm5 e volatil
+            // pela ABI, mas estamos no meio de uma funcao: salvamos na pilha
+            // para nao pisar em nada que o compilador tenha deixado vivo ali.
+            a.cmpVar32(vQzMul, 0);
+            a.jcc(Asm::LE, "plain");
+            a.db({0x48, 0x83, 0xEC, 0x10});              // sub rsp,0x10
+            a.db({0x0F, 0x11, 0x2C, 0x24});              // movups [rsp],xmm5
+            for (int i = 0; i < 7; ++i) {
+                a.db({0x0F, 0xB6, 0x48, 0x20 + i});      // movzx ecx,byte[rax+0x20+i]
+                a.db({0xF3, 0x0F, 0x2A, 0xE9});          // cvtsi2ss xmm5,ecx
+                a.rip({0xF3, 0x0F, 0x59, 0x2D}, vQzMul); // mulss   xmm5,[qzmul]
+                a.db({0xF3, 0x0F, 0x2C, 0xCD});          // cvttss2si ecx,xmm5
+                a.db({0x01, 0x4D, i * 4});               // add [rbp+i*4],ecx
+            }
+            a.db({0x0F, 0x10, 0x2C, 0x24});              // movups xmm5,[rsp]
+            a.db({0x48, 0x83, 0xC4, 0x10});              // add rsp,0x10
+            a.jmp("done");
+            a.label("plain");
+            a.raw(&h.orig[0], h.orig.size());            // os 49 bytes originais
+            a.label("done");
+            a.jmpAbs(h.site + h.steal);
+
         } else {   // HK_ITEM
             // savedata::Manager::AddItem(this=rcx, id=edx, count=r8d)
             // ids 0x136..0x13E sao os sepith; o resto e item comum.
@@ -539,6 +673,7 @@ void Engine::syncHooks()
     want[HK_EXP]   = feat[F_EXPMUL].on;
     want[HK_MIRA]  = feat[F_MIRAMUL].on;
     want[HK_ITEM]  = feat[F_ITEMMUL].on || feat[F_SEPMUL].on;
+    want[HK_QUARTZ]= feat[F_QZMUL].on;
 
     for (int i = 0; i < HK_COUNT; ++i) {
         if (want[i] && !hooks[i].on)  installHook(i);
@@ -558,6 +693,23 @@ void Engine::writeVars()
     float   mirmul = feat[F_MIRAMUL].on ? feat[F_MIRAMUL].value : 0.0f;
     float   itemul = feat[F_ITEMMUL].on ? feat[F_ITEMMUL].value : 0.0f;
     float   sepmul = feat[F_SEPMUL ].on ? feat[F_SEPMUL ].value : 0.0f;
+    float   qzmul  = feat[F_QZMUL  ].on ? feat[F_QZMUL  ].value : 0.0f;
+
+    // So escreve quando algo muda: sao 11 WriteProcessMemory por ciclo, e o
+    // trainer roda 40x por segundo em cima de um processo que esta renderizando.
+    struct VarSnap {
+        int32_t god, onehit;
+        float defmul, dmgmul, expmul, mirmul, itemul, sepmul, qzmul;
+        uint64_t lo, hi;
+    };
+    static VarSnap last;
+    VarSnap now;
+    now.god = god; now.onehit = onehit;
+    now.defmul = defmul; now.dmgmul = dmgmul; now.expmul = expmul;
+    now.mirmul = mirmul; now.itemul = itemul; now.sepmul = sepmul; now.qzmul = qzmul;
+    now.lo = partyLo; now.hi = partyHi;
+    if (varsValid && memcmp(&now, &last, sizeof(now)) == 0) return;
+    last = now; varsValid = true;
 
     proc.writeT(vGod,     god);
     proc.writeT(vOneHit,  onehit);
@@ -567,6 +719,7 @@ void Engine::writeVars()
     proc.writeT(vMiraMul, mirmul);
     proc.writeT(vItemMul, itemul);
     proc.writeT(vSepMul,  sepmul);
+    proc.writeT(vQzMul,   qzmul);
     proc.writeT(vPartyLo, partyLo);
     proc.writeT(vPartyHi, partyHi);
 }
@@ -687,39 +840,56 @@ void Engine::poll()
 
     writeVars();
     syncHooks();
+    ++pollTick;
 
     if (!partyLo) { snapshot.clear(); return; }
-    if ((pollTick % 40) == 0 || nameBlock.empty()) refreshNameTable();
 
     // --- array de Status ------------------------------------------------------
-    const size_t blockSize = (size_t)kStatusSlots * offStatusStr;
-    if (blockSize < sizeof(StatusView)) { snapshot.clear(); return; }
-    static std::vector<uint8_t> block;
-    if (block.size() != blockSize) block.assign(blockSize, 0);
-    if (!proc.read(partyLo, &block[0], blockSize)) { snapshot.clear(); return; }
+    // Sao ~107 KB por leitura. So vale a pena ler se alguma trava de HP/EP/CP
+    // esta ligada ou se a aba Party esta aberta; fora isso o trainer nao encosta
+    // no processo do jogo.
+    const bool infHp = feat[F_INFHP].on;
+    const bool infEp = feat[F_INFEP].on;
+    const bool infCp = feat[F_INFCP].on;
 
-    std::vector<CharaRow> rows;
-    bool infHp = feat[F_INFHP].on, infEp = feat[F_INFEP].on, infCp = feat[F_INFCP].on;
+    if (infHp || infEp || infCp || wantSnapshot != 0) {
+        if ((pollTick % 40) == 0 || nameBlock.empty()) refreshNameTable();
 
-    for (int slot = 1; slot < kStatusSlots; ++slot) {
-        const uint8_t* rec = &block[(size_t)slot * offStatusStr];
-        StatusView s;
-        memcpy(&s, rec, sizeof(StatusView));
-        if (!statusLooksValid(s)) continue;
+        const size_t blockSize = (size_t)kStatusSlots * offStatusStr;
+        static std::vector<uint8_t> block;
+        if (blockSize >= sizeof(StatusView)) {
+            if (block.size() != blockSize) block.assign(blockSize, 0);
+            if (proc.read(partyLo, &block[0], blockSize)) {
+                std::vector<CharaRow> rows;
+                for (int slot = 1; slot < kStatusSlots; ++slot) {
+                    const uint8_t* rec = &block[(size_t)slot * offStatusStr];
+                    StatusView st;
+                    memcpy(&st, rec, sizeof(StatusView));
+                    if (!statusLooksValid(st)) continue;
 
-        CharaRow r;
-        r.slot = slot;
-        r.addr = partyLo + (uint64_t)slot * offStatusStr;
-        r.st   = s;
-        wcsncpy(r.name, nameFor(s.charaId), 31);
-        r.name[31] = 0;
-        rows.push_back(r);
+                    CharaRow r;
+                    r.slot = slot;
+                    r.addr = partyLo + (uint64_t)slot * offStatusStr;
+                    r.st   = st;
+                    wcsncpy(r.name, nameFor(st.charaId), 31);
+                    r.name[31] = 0;
+                    rows.push_back(r);
 
-        if (infHp && s.hp != s.maxHp) proc.writeT<int32_t>(r.addr + 0x0C, s.maxHp);
-        if (infEp && s.ep != s.maxEp) proc.writeT<int32_t>(r.addr + 0x14, s.maxEp);
-        if (infCp && s.cp != s.maxCp) proc.writeT<int32_t>(r.addr + 0x1C, s.maxCp);
+                    if (infHp && st.hp != st.maxHp)
+                        proc.writeT<int32_t>(r.addr + 0x0C, st.maxHp);
+                    if (infEp && st.ep != st.maxEp)
+                        proc.writeT<int32_t>(r.addr + 0x14, st.maxEp);
+                    if (infCp && st.cp != st.maxCp)
+                        proc.writeT<int32_t>(r.addr + 0x1C, st.maxCp);
+                }
+                snapshot.swap(rows);
+            } else {
+                snapshot.clear();
+            }
+        }
+    } else {
+        snapshot.clear();
     }
-    snapshot.swap(rows);
 
     // --- economia -------------------------------------------------------------
     if (feat[F_MIRA].on && offMira) {
@@ -753,7 +923,6 @@ void Engine::poll()
             }
         }
     }
-    ++pollTick;
 }
 
 // -----------------------------------------------------------------------------
@@ -770,8 +939,14 @@ std::wstring Engine::statusLine()
     else {
         int hooksOn = 0;
         for (int i = 0; i < HK_COUNT; ++i) if (hooks[i].on) ++hooksOn;
-        swprintf(buf, 256, L"CONECTADO  PID %lu  -  %d/%d assinaturas  -  %d hook(s)",
-                 (unsigned long)proc.pid, totalSigs - missingSigs, totalSigs, hooksOn);
+        if (staleFixed)
+            swprintf(buf, 256,
+                     L"CONECTADO  PID %lu  -  %d/%d assinaturas  -  %d hook(s)  -  %d patch(es) orfao(s) limpo(s)",
+                     (unsigned long)proc.pid, totalSigs - missingSigs, totalSigs,
+                     hooksOn, staleFixed);
+        else
+            swprintf(buf, 256, L"CONECTADO  PID %lu  -  %d/%d assinaturas  -  %d hook(s)",
+                     (unsigned long)proc.pid, totalSigs - missingSigs, totalSigs, hooksOn);
         out = buf;
     }
     LeaveCriticalSection(&lock);

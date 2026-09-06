@@ -23,13 +23,16 @@ const char* STATUS_ARR = "48 69 C2 s4 48 05 s4 49 03 C2";
 const char* MIRA_ADD   = "48 83 EC 28 44 8B 81 s4 41 B9 7F 96 98 00 44 03 C2";
 const char* SEPITH     = "89 82 s4 44 8B 93 AC 5B 12 00";
 const char* ADD_ITEM   = "48 89 6C 24 20 56 57 41 56 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
-                         "48 89 44 24 50 48 8B 05 ?? ?? ?? ??";
+                         "48 89 44 24 50 48 8B 05 ?? ?? ?? ?? 48 8B F1";
 const char* TABLE_FIND = "48 89 5C 24 08 44 8B 51 28 33 C0 48 8B 59 20 44 8B DA 4F 8D 04 92 4D 03 C0 "
                          "46 8B 4C C3 4C 45 85 C9 74 38 4C 8B 41 10 49 63 CA 48 8D 14 89 48 03 D2 "
                          "44 8B 54 D3 48 8B 5C D3 44 66 0F 1F 44 00 00 41 8B D2 0F AF D0 48 03 D3 "
                          "49 03 D0 0F B7 0A";
 const char* ADDHP      = "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 30 48 8B B9 E0 05 00 00";
-const char* EXPCALC    = "8B C5 48 8B AC 24 88 00 00 00 48 81 C4 90 00 00 00";
+const char* EXPCALC    = "8B C5 48 8B AC 24 88 00 00 00 48 81 C4 90 00 00 00 41 5C C3 CC CC CC CC CC";
+const char* QUARTZ_ELEM= "0F B6 48 20 01 4D 00 0F B6 48 21 01 4D 04 0F B6 48 22 01 4D 08 "
+                         "0F B6 48 23 01 4D 0C 0F B6 48 24 01 4D 10 0F B6 48 25 01 4D 14 "
+                         "0F B6 48 26 01 4D 18 E9 ?? ?? ?? ?? CC CC CC 48 89 5C 24 18 55";
 }
 
 static std::vector<uint8_t> g_text;
@@ -151,6 +154,7 @@ int main(int argc, char** argv)
     test("table_find",  sig::TABLE_FIND, false);
     test("addhp",       sig::ADDHP,      false);
     test("expcalc",     sig::EXPCALC,    false);
+    test("quartz_elem", sig::QUARTZ_ELEM,false);
 
     // --- trampolins montados com enderecos ficticios mas realistas -----------
     const uint64_t CAVE = 0x13F000000ULL;
@@ -158,11 +162,17 @@ int main(int argc, char** argv)
     const uint64_t vGod = CAVE + 0x10, vOneHit = CAVE + 0x14;
     const uint64_t vDefMul = CAVE + 0x18, vDmgMul = CAVE + 0x1C, vExpMul = CAVE + 0x20;
     const uint64_t vMiraMul = CAVE + 0x24, vItemMul = CAVE + 0x28, vSepMul = CAVE + 0x2C;
+    const uint64_t vQzMul = CAVE + 0x30;
 
     uint8_t orig0[5]  = { 0x48, 0x89, 0x5C, 0x24, 0x18 };
     uint8_t orig1[10] = { 0x8B, 0xC5, 0x48, 0x8B, 0xAC, 0x24, 0x88, 0x00, 0x00, 0x00 };
     uint8_t orig2[11] = { 0x48, 0x83, 0xEC, 0x28, 0x44, 0x8B, 0x81, 0x48, 0xB6, 0x20, 0x00 };
     uint8_t orig3[5]  = { 0x48, 0x89, 0x6C, 0x24, 0x20 };
+    uint8_t orig4[49];
+    for (int i = 0; i < 7; ++i) {
+        orig4[i*7+0]=0x0F; orig4[i*7+1]=0xB6; orig4[i*7+2]=0x48; orig4[i*7+3]=(uint8_t)(0x20+i);
+        orig4[i*7+4]=0x01; orig4[i*7+5]=0x4D; orig4[i*7+6]=(uint8_t)(i*4);
+    }
 
     printf("\n== trampolins ==\n");
     {
@@ -247,6 +257,27 @@ int main(int argc, char** argv)
         a.raw(orig3, sizeof(orig3));
         a.jmpAbs(0x14043C090ULL + 5);
         dumpBytes("AddItem", CAVE + 0x1800, a.finish());
+    }
+    {
+        Asm a(CAVE + 0x1C00);
+        a.cmpVar32(vQzMul, 0);             a.jcc(Asm::LE, "plain");
+        a.db({0x48, 0x83, 0xEC, 0x10});
+        a.db({0x0F, 0x11, 0x2C, 0x24});
+        for (int i = 0; i < 7; ++i) {
+            a.db({0x0F, 0xB6, 0x48, 0x20 + i});
+            a.db({0xF3, 0x0F, 0x2A, 0xE9});
+            a.rip({0xF3, 0x0F, 0x59, 0x2D}, vQzMul);
+            a.db({0xF3, 0x0F, 0x2C, 0xCD});
+            a.db({0x01, 0x4D, i * 4});
+        }
+        a.db({0x0F, 0x10, 0x2C, 0x24});
+        a.db({0x48, 0x83, 0xC4, 0x10});
+        a.jmp("done");
+        a.label("plain");
+        a.raw(orig4, sizeof(orig4));
+        a.label("done");
+        a.jmpAbs(0x1400FA757ULL + 49);
+        dumpBytes("QuartzElem", CAVE + 0x1C00, a.finish());
     }
     return 0;
 }

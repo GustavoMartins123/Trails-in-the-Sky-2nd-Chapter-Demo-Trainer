@@ -263,6 +263,7 @@ static void showTab(int tab)
     ShowWindow(g_edItem, econ); ShowWindow(g_lbItem, econ);
 
     ShowWindow(g_party, (tab == 3) ? SW_SHOW : SW_HIDE);
+    g_engine.wantSnapshot = (tab == 3) ? 1 : 0;
     InvalidateRect(g_main, nullptr, TRUE);
 }
 
