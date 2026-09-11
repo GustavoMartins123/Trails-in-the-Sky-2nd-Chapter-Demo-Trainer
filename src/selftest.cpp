@@ -5,7 +5,7 @@
 //
 //  1) carrega a secao de codigo direto do arquivo .exe
 //  2) roda cada assinatura do trainer e mostra endereco + capturas
-//  3) monta os quatro trampolins com o mesmo Asm usado em producao e
+//  3) monta os cinco trampolins com o mesmo Asm usado em producao e
 //     despeja os bytes para conferencia no disassembler
 // =============================================================================
 #include "trainer.h"
@@ -238,21 +238,34 @@ int main(int argc, char** argv)
     {
         Asm a(CAVE + 0x1800);
         a.db({0x45, 0x85, 0xC0});          a.jcc(Asm::LE, "orig");
+        a.db({0x85, 0xD2});                a.jcc(Asm::S, "orig");
+        a.db({0x81, 0xFA, 0x88, 0x13, 0x00, 0x00});
+        a.jcc(Asm::AE, "orig");
         a.db({0x8D, 0x82, 0xCA, 0xFE, 0xFF, 0xFF});
         a.db({0x83, 0xF8, 0x08});          a.jcc(Asm::A, "item");
+
         a.cmpVar32(vSepMul, 0);            a.jcc(Asm::LE, "orig");
         a.db({0xF3, 0x41, 0x0F, 0x2A, 0xE8});
         a.rip({0xF3, 0x0F, 0x59, 0x2D}, vSepMul);
         a.db({0xF3, 0x44, 0x0F, 0x2C, 0xC5});
-        a.jmp("clamp");
+        a.db({0x45, 0x85, 0xC0});          a.jcc(Asm::S, "sepmax");
+        a.db({0x41, 0x81, 0xF8, 0x9F, 0x86, 0x01, 0x00});
+        a.jcc(Asm::LE, "orig");
+        a.label("sepmax");
+        a.db({0x41, 0xB8, 0x9F, 0x86, 0x01, 0x00});
+        a.jmp("orig");
+
         a.label("item");
         a.cmpVar32(vItemMul, 0);           a.jcc(Asm::LE, "orig");
         a.db({0xF3, 0x41, 0x0F, 0x2A, 0xE8});
         a.rip({0xF3, 0x0F, 0x59, 0x2D}, vItemMul);
         a.db({0xF3, 0x44, 0x0F, 0x2C, 0xC5});
-        a.label("clamp");
-        a.db({0x45, 0x85, 0xC0});          a.jcc(Asm::NS, "orig");
-        a.db({0x41, 0xB8, 0x9F, 0x86, 0x01, 0x00});
+        a.db({0x45, 0x85, 0xC0});          a.jcc(Asm::S, "itemmax");
+        a.db({0x41, 0x81, 0xF8, 0xE7, 0x03, 0x00, 0x00});
+        a.jcc(Asm::LE, "orig");
+        a.label("itemmax");
+        a.db({0x41, 0xB8, 0xE7, 0x03, 0x00, 0x00});
+
         a.label("orig");
         a.raw(orig3, sizeof(orig3));
         a.jmpAbs(0x14043C090ULL + 5);

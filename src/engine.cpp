@@ -143,7 +143,7 @@ const FeatureInfo kFeatures[] = {
    L"Multiplica toda mira recebida: venda, missao, bau, evento. Teto: 9.999.999.",
    true, 1.0f, 100.0f, 5.0f, L"x" },
  { F_ITEMMUL, 2, L"Multiplicador de Itens Recebidos",
-   L"Multiplica a quantidade de cada item que voce ganha ou compra.",
+   L"Multiplica itens validos do inventario e limita a pilha a 999.",
    true, 1.0f, 100.0f, 5.0f, L"x" },
  { F_MIRA, 2, L"Mira Travada",
    L"Trava o seu dinheiro no valor definido abaixo.",
@@ -355,12 +355,12 @@ bool Engine::allocCave()
         uint64_t hint = proc.base - (uint64_t)step * 0x10000;
         if (hint <= 0x100000) break;
         LPVOID p = VirtualAllocEx(proc.handle, (LPVOID)hint, sz,
-                                  MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                                  MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (p) { cave = (uint64_t)p; break; }
     }
     if (!cave) {
         LPVOID p = VirtualAllocEx(proc.handle, nullptr, sz,
-                                  MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                                  MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!p) return false;
         cave = (uint64_t)p;
     }
@@ -425,6 +425,7 @@ bool Engine::repairSite(uint64_t site, uint32_t steal, const Pattern& pat)
         hdr.origLen <= sizeof(hdr.orig)) {
         std::vector<HANDLE> fr = proc.freezeThreads();
         bool ok = proc.write(site, hdr.orig, hdr.origLen);
+        if (ok) FlushInstructionCache(proc.handle, (LPCVOID)site, hdr.origLen);
         proc.thawThreads(fr);
         if (ok) { ++staleFixed; return true; }
     }
@@ -440,6 +441,7 @@ bool Engine::repairSite(uint64_t site, uint32_t steal, const Pattern& pat)
     }
     std::vector<HANDLE> fr = proc.freezeThreads();
     bool ok = proc.write(site, &lit[0], lit.size());
+    if (ok) FlushInstructionCache(proc.handle, (LPCVOID)site, lit.size());
     proc.thawThreads(fr);
     if (ok) ++staleFixed;
     return ok;
@@ -610,28 +612,47 @@ bool Engine::installHook(int which)
 
         } else {   // HK_ITEM
             // savedata::Manager::AddItem(this=rcx, id=edx, count=r8d)
-            // ids 0x136..0x13E sao os sepith; o resto e item comum.
+            // ids 0x136..0x13E sao sepith. Para itens comuns, so aceitamos
+            // ids dentro da tabela real (0..4999) e nunca entregamos ao jogo
+            // uma pilha maior do que o proprio inventario suporta (999).
             a.db({0x45, 0x85, 0xC0});                    // test r8d,r8d
             a.jcc(Asm::LE, "orig");
+            a.db({0x85, 0xD2});                          // test edx,edx
+            a.jcc(Asm::S, "orig");                       // id negativo/especial -> nao mexe
+            a.db({0x81, 0xFA, 0x88, 0x13, 0x00, 0x00});  // cmp edx,5000
+            a.jcc(Asm::AE, "orig");                      // fora da tabela -> nao mexe
             a.db({0x8D, 0x82, 0xCA, 0xFE, 0xFF, 0xFF});  // lea eax,[rdx-0x136]
             a.db({0x83, 0xF8, 0x08});                    // cmp eax,8
             a.jcc(Asm::A, "item");
+
+            // ---- sepith: teto 99.999 -----------------------------------------
             a.cmpVar32(vSepMul, 0);
             a.jcc(Asm::LE, "orig");
             a.db({0xF3, 0x41, 0x0F, 0x2A, 0xE8});        // cvtsi2ss xmm5,r8d
             a.rip({0xF3, 0x0F, 0x59, 0x2D}, vSepMul);    // mulss   xmm5,[sepmul]
             a.db({0xF3, 0x44, 0x0F, 0x2C, 0xC5});        // cvttss2si r8d,xmm5
-            a.jmp("clamp");
+            a.db({0x45, 0x85, 0xC0});                    // test r8d,r8d
+            a.jcc(Asm::S, "sepmax");                     // overflow -> teto
+            a.db({0x41, 0x81, 0xF8, 0x9F, 0x86, 0x01, 0x00}); // cmp r8d,99999
+            a.jcc(Asm::LE, "orig");
+            a.label("sepmax");
+            a.db({0x41, 0xB8, 0x9F, 0x86, 0x01, 0x00});  // mov r8d,99999
+            a.jmp("orig");
+
+            // ---- item comum: teto 999 ----------------------------------------
             a.label("item");
             a.cmpVar32(vItemMul, 0);
             a.jcc(Asm::LE, "orig");
             a.db({0xF3, 0x41, 0x0F, 0x2A, 0xE8});        // cvtsi2ss xmm5,r8d
             a.rip({0xF3, 0x0F, 0x59, 0x2D}, vItemMul);   // mulss   xmm5,[itemmul]
             a.db({0xF3, 0x44, 0x0F, 0x2C, 0xC5});        // cvttss2si r8d,xmm5
-            a.label("clamp");
             a.db({0x45, 0x85, 0xC0});                    // test r8d,r8d
-            a.jcc(Asm::NS, "orig");
-            a.db({0x41, 0xB8, 0x9F, 0x86, 0x01, 0x00});  // overflow -> 99999
+            a.jcc(Asm::S, "itemmax");                    // overflow -> teto
+            a.db({0x41, 0x81, 0xF8, 0xE7, 0x03, 0x00, 0x00}); // cmp r8d,999
+            a.jcc(Asm::LE, "orig");
+            a.label("itemmax");
+            a.db({0x41, 0xB8, 0xE7, 0x03, 0x00, 0x00});  // mov r8d,999
+
             a.label("orig");
             a.raw(&h.orig[0], h.orig.size());            // mov [rsp+20],rbp
             a.jmpAbs(h.site + h.steal);
@@ -639,6 +660,15 @@ bool Engine::installHook(int which)
 
         std::vector<uint8_t> code = a.finish();
         if (!proc.write(t, &code[0], code.size())) return false;
+
+        // A cave nasce RW para que as variaveis de controle nao fiquem
+        // executaveis. Depois de montar cada trampolim, somente a pagina de
+        // codigo vira RX. Se outro trampolim cair na mesma pagina, Process::write
+        // abre a protecao temporariamente e a restaura em seguida.
+        DWORD oldProtect = 0;
+        if (!VirtualProtectEx(proc.handle, (LPVOID)slot, 0x400,
+                              PAGE_EXECUTE_READ, &oldProtect)) return false;
+        FlushInstructionCache(proc.handle, (LPCVOID)t, code.size());
         h.tramp = t;
     }
 
@@ -649,6 +679,7 @@ bool Engine::installHook(int which)
 
     std::vector<HANDLE> frozen = proc.freezeThreads();
     bool ok = proc.write(h.site, &patch[0], patch.size());
+    if (ok) FlushInstructionCache(proc.handle, (LPCVOID)h.site, patch.size());
     proc.thawThreads(frozen);
 
     h.on = ok;
@@ -660,9 +691,10 @@ void Engine::removeHook(int which)
     Hook& h = hooks[which];
     if (!h.on || h.orig.empty()) { h.on = false; return; }
     std::vector<HANDLE> frozen = proc.freezeThreads();
-    proc.write(h.site, &h.orig[0], h.orig.size());
+    bool ok = proc.write(h.site, &h.orig[0], h.orig.size());
+    if (ok) FlushInstructionCache(proc.handle, (LPCVOID)h.site, h.orig.size());
     proc.thawThreads(frozen);
-    h.on = false;
+    if (ok) h.on = false;
 }
 
 void Engine::syncHooks()
